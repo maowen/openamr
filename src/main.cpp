@@ -206,6 +206,7 @@ void setup(void){
   Serial.println("");
   chipId = system_get_chip_id();
   Serial.printf("ESP8266 Chip ID: %u (0x%x)\n", chipId, chipId);
+  printf("Test Printf\n");
 
   // Wait for connection
   while (WiFi.status() != WL_CONNECTED) {
@@ -221,6 +222,8 @@ void setup(void){
   if (mdns.begin("esp8266", WiFi.localIP())) {
     Serial.println("MDNS responder started");
   }
+
+  printf("Test Printf\n");
 
   server.on("/", handleRoot);
 
