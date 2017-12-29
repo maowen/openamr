@@ -1,0 +1,3 @@
+[submodule "lib/ert-amr"]
+	path = lib/ert-amr
+	url = https://bitbucket.org/maowen/ert-amr
