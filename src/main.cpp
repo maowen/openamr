@@ -9,6 +9,7 @@
 #include <NtpClientLib.h>
 #include <Ticker.h>
 #include <Time.h>
+#include <WiFiUdp.h>
 
 // NTP Options:
 // NtpClientLib - No ISO time. Supports DST
@@ -36,6 +37,11 @@ Ticker logProcessing;
 const char* ssid = "Lugubrious";
 const char* password = "iLoVeMyWiFe";
 MDNSResponder mdns;
+
+const char i7559IP[] = "192.168.1.13";
+const char rpi2IP[] = "192.168.1.101";
+const int msgServerPort = 3456;
+WiFiUDP udp;
 
 ESP8266WebServer server(80);
 
@@ -383,8 +389,11 @@ void handleIdmMsg(const AmrIdmMsg * msg) {
               String(msg->data.x18.lastConsumptionHighRes),
           NULL);
 
-    printIdmMsg(dateStr.c_str(), msg);
       // return;
+    }
+
+    if (msg && msg->ertType == 0x18) {
+      printIdmMsg(dateStr.c_str(), msg);
     }
 
 
@@ -393,16 +402,28 @@ void handleIdmMsg(const AmrIdmMsg * msg) {
     // thingSpeak.downloadString("http://api.thingspeak.com/update", onDataReceived);
 }
 
-void handleAmrMsg(const void * msg, AMR_MSG_TYPE msgType) {
+void handleAmrMsg(const void * msg, AMR_MSG_TYPE msgType, const uint8_t * data) {
   switch (msgType) {
     case AMR_MSG_TYPE_SCM:
       handleScmMsg((const AmrScmMsg *)msg);
+      udp.beginPacket(rpi2IP, msgServerPort);
+      udp.write(data, AMR_MSG_SCM_RAW_SIZE);
+      udp.endPacket();
+      udp.beginPacket(i7559IP, msgServerPort);
+      udp.write(data, AMR_MSG_SCM_RAW_SIZE);
+      udp.endPacket();
     break;
     case AMR_MSG_TYPE_SCM_PLUS:
       handleScmPlusMsg((const AmrScmPlusMsg *)msg);
     break;
     case AMR_MSG_TYPE_IDM:
       handleIdmMsg((const AmrIdmMsg *)msg);
+      udp.beginPacket(rpi2IP, msgServerPort);
+      udp.write(data, AMR_MSG_IDM_RAW_SIZE);
+      udp.endPacket();
+      udp.beginPacket(i7559IP, msgServerPort);
+      udp.write(data, AMR_MSG_IDM_RAW_SIZE);
+      udp.endPacket();
     break;
     default:
     break;
