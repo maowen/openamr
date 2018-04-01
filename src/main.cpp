@@ -7,21 +7,28 @@
 #include <ESP8266mDNS.h>
 #include <Esp.h>
 #include <NtpClientLib.h>
+// #include <NTPtimeESP.h>
 #include <Ticker.h>
 #include <Time.h>
 #include <WiFiUdp.h>
+#include <AsyncMqttClient.h>
 
 // NTP Options:
 // NtpClientLib - No ISO time. Supports DST
-
 
 extern "C" {
   #include <user_interface.h>
   #include "../lib/ert-amr/amr.h"
 }
+
 #define MAX_POST_DATA_SIZE 256
 // #define AMR_METER_ID 27367479
-#define AMR_METER_ID 32839945
+const int AMR_IDM_METER_ID         = 32839945;
+const int AMR_SCM_METER_ID_CONSUMP = 32839945;
+const int AMR_SCM_METER_ID_EXCESS  = 32839946;
+const int AMR_SCM_METER_ID_RESIDUAL= 32839947;
+const int AMR_SCM_WH_CONVERSION = 10; // 10 Wh to Wh
+
 #define AMR_THINGSPEAK_API_KEY "HVRMOK9KTZ1JUZJO"
 #define ESP_LOG_THINGSPEAK_API_KEY "Y0XGGA3S6DFY1QOQ"
 #define AMR_THINGSPEAK_UPDATE_URL "http://184.106.153.149/update"
@@ -32,6 +39,19 @@ static struct rst_info* rtc_info = NULL;
 static char logMsg[128] = "";
 Ticker amrProcessing;
 Ticker logProcessing;
+
+const char THINGSBOARD_DEVICE_ID[] = "f1d7e9b0-fa7b-11e7-abe9-1d8d2edf4f93";
+const char THINGSBOARD_ACCESS_TOKEN[] = "Va1ce6shTIPj9soYVtms";
+const char THINGSBOARD_LOCAL_DEVICE_ID[] = "e81d6670-33dd-11e8-81c0-a52d9fdb371f";
+const char THINGSBOARD_LOCAL_ACCESS_TOKEN[] = "uoO0MCfSe1o5MD8q5qbT";
+AsyncMqttClient mqttClient;
+String mqttPayload;
+String mqttTopic;
+AsyncMqttClient mqttClientLocal;
+String mqttPayloadLocal;
+String mqttTopicLocal;
+const String mqttTelemTopic = "v1/devices/me/telemetry";
+char mqttBuffer[256];
 
 
 const char* ssid = "Lugubrious";
@@ -245,6 +265,67 @@ bool postRequest(String & uri, const char * body, uint32_t bodyLen, void * cb) {
   return httpRequest(HttpRequest::HTTP_POST, uri, body, bodyLen, cb);
 }
 
+static int publishMqttPayload(AsyncMqttClient &client, const String &topic, const String &payload) {
+  int success = 0;
+  if (client.connected()) {
+    const uint8_t qos = 0;
+    const uint8_t retain = 1;
+    success = client.publish(topic.c_str(), qos, retain, payload.c_str());
+  }
+
+  if (success) {
+    printf("%s: Topic: %s Payload: %s\n\r", __FUNCTION__, topic.c_str(), payload.c_str());
+  }
+  else {
+    Serial.printf("%s: Failed to Publish MQTT message: MQTT Client Not Connected!\r\n");
+  }
+  return success;
+}
+void publishOnMqttConnect(bool sessionPresent) {
+  if (mqttPayload != "") {
+    int success = publishMqttPayload(mqttClient, mqttTopic, mqttPayload);
+    if (success) {
+      mqttPayload = "";
+    }
+  }
+}
+
+void publishOnMqttConnectLocal(bool sessionPresent) {
+  if (mqttPayloadLocal != "") {
+    int success = publishMqttPayload(mqttClientLocal, mqttTopicLocal, mqttPayloadLocal);
+    if (success) {
+      mqttPayloadLocal = "";
+    }
+  }
+}
+
+
+int thingsboardPublishTelem(const String &payload) {
+  int success = 0;
+  if (mqttClient.connected()) {
+    success = publishMqttPayload(mqttClient, mqttTelemTopic, payload);
+  }
+
+  if (!success) {
+      mqttTopic = mqttTelemTopic;
+      mqttPayload = payload;
+      mqttClient.connect();
+  }
+
+  success = 0;
+  if (mqttClientLocal.connected()) {
+    success = publishMqttPayload(mqttClientLocal, mqttTelemTopic, payload);
+  }
+
+  if (!success) {
+      mqttTopicLocal = mqttTelemTopic;
+      mqttPayloadLocal = payload;
+      mqttClientLocal.connect();
+  }
+
+  return 0;
+}
+
 
 /*
 int onDataSent(HttpConnection& client, bool successful)
@@ -277,14 +358,20 @@ void logESPStats() {
      * 6 - Msg
      */
 
+    time_t t = now(); //NTP.getTime();;
+    unsigned long t_ms = millis();
+    // time_t t = NTP.getTime();
+    printf("getTime=%lu millis=%lu\n\r", t, t_ms);
+
     if (uptime % 300 == 0)
     {
-      String dateStr = NTP.getTimeDateString();
-      // uint32_t freeHeap = system_get_free_heap_size();
+      String dateStr = "NONE"; // NTP.getTimeDateString();
       uint32_t freeHeap = ESP.getFreeHeap();
 
       Serial.printf("Uploading status log. %s uptime=%u free=%u\r\n",
                     dateStr.c_str(), uptime, freeHeap);
+      // {"ts":1451649600512, "values":{"key1":"value1", "key2":"value2"}}
+/*
       String espStatus = "api.thingspeak.com/update?key=" ESP_LOG_THINGSPEAK_API_KEY
                          "&timezone=America%2FDenver" +
                          String("&field1=") + String(chipId) +
@@ -292,9 +379,15 @@ void logESPStats() {
                          "&field3=" + String(freeHeap) +
                          "&field4=" + connectStatusStr() +
                          "&field5=" + String(logMsg);
-      os_printf("Logging ESP Status %s\n", espStatus.c_str());
-      // thingSpeak.downloadString( espStatus, onDataSent);
-      getRequest(espStatus, NULL);
+      // getRequest(espStatus, NULL);
+                         */
+      String logPayload = String("{\"Uptime\":" + String(uptime) +
+                         ", \"FreeHeap\":" + String(freeHeap) +
+                         ", \"ConnectStatus\":\"" + connectStatusStr()) +
+                        //  ", \"ConnectState\":\"" + String(wifi_station_get_connect_status()) +
+                         "\"}";
+      thingsboardPublishTelem(logPayload);
+      os_printf("Logging ESP Status %s\n", logPayload.c_str());
       logMsg[0] = '\0';
     }
 
@@ -307,9 +400,31 @@ void handleScmMsg(const AmrScmMsg * msg) {
     String dateStr = now.toISO8601();
     printScmMsg(dateStr.c_str(), msg);
     */
-    String dateStr = NTP.getTimeDateString();
+    String dateStr = "NONE"; // NTP.getTimeDateString();
 
-    if (msg && (msg->id & 0xfffffff0) == (AMR_METER_ID & 0xfffffff0)) {
+    // TODO Compute differential production and net usage values
+    // TODO Compute running total for each day
+
+    if (msg) {
+      String scmPayload;
+      if (msg->id == AMR_SCM_METER_ID_CONSUMP) {
+        scmPayload = "{\"Consumption\":" + String(msg->consumption * AMR_SCM_WH_CONVERSION) + "}";
+        thingsboardPublishTelem(scmPayload);
+        printf("mqttMsg: %s\r\n", scmPayload.c_str());
+        printScmMsg(dateStr.c_str(), msg);
+      }
+      else if (msg->id == AMR_SCM_METER_ID_EXCESS) {
+        scmPayload = "{\"Production\":" + String(msg->consumption * AMR_SCM_WH_CONVERSION) + "}";
+        thingsboardPublishTelem(scmPayload);
+        printf("mqttMsg: %s\r\n", scmPayload.c_str());
+        printScmMsg(dateStr.c_str(), msg);
+      }
+      else if (msg->id == AMR_SCM_METER_ID_RESIDUAL) {
+        scmPayload = "{\"NetUsage\":" + String(msg->consumption * AMR_SCM_WH_CONVERSION) + "}";
+        thingsboardPublishTelem(scmPayload);
+        printf("mqttMsg: %s\r\n", scmPayload.c_str());
+        printScmMsg(dateStr.c_str(), msg);
+      }
       // Serial.printf("\r\n\r\nUploading SCM Msg (%s)\r\n", dateStr.c_str());
       // getRequest(
       //     "api.thingspeak.com/update?key=" AMR_THINGSPEAK_API_KEY
@@ -318,7 +433,15 @@ void handleScmMsg(const AmrScmMsg * msg) {
       //     "&field1=" +
       //         String(msg->consumption),
       //     NULL);
-      printScmMsg(dateStr.c_str(), msg);
+/*
+      snprintf(mqttBuffer, sizeof(mqttBuffer),
+               "{\"ertId\":%u, \"consumptionHR\":%u, \"diffConsumpHr\":%u, \"consumption\":%u, \"excess\":%u, "
+               "\"residual\":%u, \"msgCnt\":%u, \"txTimeOffset\":%u}",
+               msg->ertId,
+               msg->data.x18.lastConsumptionHighRes, msg->data.x18.differentialConsumption[0],
+               msg->data.x18.lastConsumption, msg->data.x18.lastExcess, msg->data.x18.lastResidual,
+               msg->consumptionIntervalCount, msg->txTimeOffset);
+               */
     }
 
     /*
@@ -343,7 +466,7 @@ void handleScmPlusMsg(const AmrScmPlusMsg * msg) {
     String dateStr = now.toISO8601();
     printScmPlusMsg(dateStr.c_str(), msg);
     */
-    String dateStr = NTP.getTimeDateString();
+    String dateStr = "NONE"; // NTP.getTimeDateString();
 
     // printScmPlusMsg(dateStr.c_str(), msg);
 
@@ -376,24 +499,77 @@ void handleIdmMsg(const AmrIdmMsg * msg) {
       return;
     }*/
 
-    String dateStr = NTP.getTimeDateString();
-
-    if (msg && (msg->ertId & 0xfffffff0) == (AMR_METER_ID & 0xfffffff0)) {
+    //time_t now = NTP.getTime();
+    String dateStr = "NONE"; // NTP.getTimeDateString();
+    if (msg && (msg->ertId == AMR_IDM_METER_ID)) {
       // Serial.printf("\r\n\r\nUploading IDM Msg (%s)\r\n", dateStr.c_str());
       /*thingSpeak.downloadString(*/
-      getRequest(
-          "api.thingspeak.com/update?key=" AMR_THINGSPEAK_API_KEY
-          /*"&created_at=" + dateStr +
-                  "&timezone=America%2FDenver" +*/
-          "&field2=" +
-              String(msg->data.x18.lastConsumptionHighRes),
-          NULL);
+      // getRequest(
+      //     "api.thingspeak.com/update?key=" AMR_THINGSPEAK_API_KEY
+      //     /*"&created_at=" + dateStr +
+      //             "&timezone=America%2FDenver" +*/
+      //     "&field2=" +
+      //         String(msg->data.x18.lastConsumptionHighRes) +
+      //     "&field3=" +
+      //         String(msg->data.x18.differentialConsumption[0]),
+      //     NULL);
+        
+      // Mqtt data format: {"key1":"value1", "key2":"value2"} or
+      // {"ts":1451649600512, "values":{"key1":"value1", "key2":"value2"}} for client side timestamp. Unix time with millisecond precision
 
+      // TODO Use NTP timestamp when uploading data
+      // TODO Shift NTP timestamp by TxTimeOffset 
+      // TODO Use msgCnt and previous message count to upload telem for missed msgs
+
+      String idmPayload =
+        "{\"ConsumptionHR\":" + String(msg->data.x18.lastConsumptionHighRes) +
+        ", \"DiffConsumptionHR\":" + String(msg->data.x18.differentialConsumption[0]) +
+        ", \"ConsumptionLR\":" + String(msg->data.x18.lastConsumption * AMR_SCM_WH_CONVERSION) +
+        ", \"ProductionLR\":" + String(msg->data.x18.lastExcess * AMR_SCM_WH_CONVERSION) +
+        ", \"NetUsageLR\":" + String(msg->data.x18.lastResidual *  AMR_SCM_WH_CONVERSION) +
+        ", \"IDMMsgCnt\":" + String(msg->consumptionIntervalCount) +
+        ", \"TxTimeOffset\":" + String(msg->txTimeOffset) +
+        "}";
+
+/*
+      snprintf(mqttBuffer, sizeof(mqttBuffer),
+               "{\"ertId\":%u, \"consumptionHR\":%u, \"diffConsumpHr\":%u, \"consumption\":%u, \"excess\":%u, "
+               "\"residual\":%u, \"msgCnt\":%u, \"txTimeOffset\":%u}",
+               msg->ertId,
+               msg->data.x18.lastConsumptionHighRes, msg->data.x18.differentialConsumption[0],
+               msg->data.x18.lastConsumption, msg->data.x18.lastExcess, msg->data.x18.lastResidual,
+               msg->consumptionIntervalCount, msg->txTimeOffset);
+               */
+      thingsboardPublishTelem(idmPayload);
+      printf("mqttMsg: %s\r\n", idmPayload.c_str());
+
+      printIdmMsg(dateStr.c_str(), msg);
       // return;
     }
 
     if (msg && msg->ertType == 0x18) {
-      printIdmMsg(dateStr.c_str(), msg);
+               /*
+      String mqttMsg = "{\"consumptionHR\":" + msg->data.x18.lastConsumptionHighRes;
+      mqttMsg += ", \"diffConsumpHR\":";
+      mqttMsg += msg->data.x18.differentialConsumption[0];
+      mqttMsg += ", \"consumption\":";
+      mqttMsg += msg->data.x18.lastConsumption;
+      mqttMsg += ", \"excess\":";
+      mqttMsg += msg->data.x18.lastExcess;
+      mqttMsg += ", \"residual\":";
+      mqttMsg += msg->data.x18.lastResidual;
+      mqttMsg += ", \"msgCnt\":";
+      mqttMsg += msg->consumptionIntervalCount;
+      mqttMsg += ", \"txTimeOffset\":";
+      mqttMsg += msg->txTimeOffset;
+      mqttMsg += "}";
+
+      printf("mqttMsg: %s\r\n", mqttMsg.c_str());
+      */
+    }
+
+    if (msg) {
+      // printIdmMsg(dateStr.c_str(), msg);
     }
 
 
@@ -433,6 +609,8 @@ void handleAmrMsg(const void * msg, AMR_MSG_TYPE msgType, const uint8_t * data) 
 WiFiEventHandler staGotIPHandler;
 WiFiEventHandler staDisconnectHandler;
 
+bool wifiFirstConnected = false;
+
 void onSTAGotIP(WiFiEventStationModeGotIP ipInfo) {
   Serial.printf("Got IP: %s\r\n", ipInfo.ip.toString().c_str());
   Serial.println("");
@@ -440,7 +618,10 @@ void onSTAGotIP(WiFiEventStationModeGotIP ipInfo) {
   Serial.println(ssid);
   Serial.print("IP address: ");
   Serial.println(WiFi.localIP());
-  NTP.begin("pool.ntp.org", 1, true);
+
+  wifiFirstConnected = true;
+  // NTP.begin();
+  // NTP.begin("pool.ntp.org", 1, true, 0);
 }
 
 void onSTADisconnected(WiFiEventStationModeDisconnected eventInfo) {
@@ -456,6 +637,17 @@ void setup(void){
   // Serial.setDebugOutput(true);
   staGotIPHandler = WiFi.onStationModeGotIP(&onSTAGotIP);
   staDisconnectHandler = WiFi.onStationModeDisconnected(&onSTADisconnected);
+
+  mqttClient.onConnect(publishOnMqttConnect);
+  mqttClient.setCredentials(THINGSBOARD_ACCESS_TOKEN);
+  mqttClient.setServer("demo.thingsboard.io", 1883);
+  mqttClient.setClientId(THINGSBOARD_DEVICE_ID);
+
+  mqttClientLocal.onConnect(publishOnMqttConnectLocal);
+  mqttClientLocal.setCredentials(THINGSBOARD_LOCAL_ACCESS_TOKEN);
+  mqttClientLocal.setServer(rpi2IP, 1883);
+  mqttClientLocal.setClientId(THINGSBOARD_LOCAL_DEVICE_ID);
+
   // Enable WiFi
   WiFi.begin(ssid, password);
   // Disable WiFi
@@ -502,4 +694,11 @@ void setup(void){
 
 void loop(void){
   server.handleClient();
+
+  if (wifiFirstConnected) {
+    NTP.begin("pool.ntp.org", 1, true, 0);
+    wifiFirstConnected = false;
+  }
+
+  
 }
