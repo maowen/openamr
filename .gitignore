@@ -5,3 +5,4 @@
 .piolibdeps
 .vscode/launch.json
 .vscode/.browse.c_cpp.db*
+node_modules

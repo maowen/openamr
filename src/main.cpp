@@ -3,7 +3,8 @@
 #include <ESP8266WiFi.h>
 // #include <ESP8266HTTPClient.h>
 #include <ESPAsyncTCP.h>
-#include <ESP8266WebServer.h>
+#include <ESPAsyncWebServer.h>
+#include "static/index.html.gz.h"
 #include <ESP8266mDNS.h>
 #include <Esp.h>
 #include <NtpClientLib.h>
@@ -12,6 +13,12 @@
 #include <Time.h>
 #include <WiFiUdp.h>
 #include <AsyncMqttClient.h>
+#include <FS.h>
+#include <Embedis.h>
+Embedis embedis(Serial);
+
+#include <EEPROM.h>
+#include "spi_flash.h"
 
 // NTP Options:
 // NtpClientLib - No ISO time. Supports DST
@@ -34,8 +41,7 @@ const int AMR_SCM_WH_CONVERSION = 10; // 10 Wh to Wh
 #define AMR_THINGSPEAK_UPDATE_URL "http://184.106.153.149/update"
 static uint32_t chipId = 0;
 static uint32_t uptime = 0;
-static uint32_t disconnectCnt = 0;
-static struct rst_info* rtc_info = NULL;
+// static struct rst_info* rtc_info = NULL;
 static char logMsg[128] = "";
 Ticker amrProcessing;
 Ticker logProcessing;
@@ -63,13 +69,41 @@ const char rpi2IP[] = "192.168.1.101";
 const int msgServerPort = 3456;
 WiFiUDP udp;
 
-ESP8266WebServer server(80);
+AsyncWebServer * server;
+char last_modified[50];
 
 const int led = 13;
 
+/*
+String getContentType(String filename) { // convert the file extension to the MIME type
+  if (filename.endsWith(".html")) return "text/html";
+  else if (filename.endsWith(".css")) return "text/css";
+  else if (filename.endsWith(".js")) return "application/javascript";
+  else if (filename.endsWith(".ico")) return "image/x-icon";
+  return "text/plain";
+}
+
+bool handleFileRead(String path) { // send the right file to the client (if it exists)
+  Serial.println("handleFileRead: " + path);
+  if (path.endsWith("/")) path += "index.html";         // If a folder is requested, send the index file
+  String contentType = getContentType(path);            // Get the MIME type
+  if (SPIFFS.exists(path)) {                            // If the file exists
+    File file = SPIFFS.open(path, "r");                 // Open it
+    size_t sent = server.streamFile(file, contentType); // And send it to the client
+    file.close();                                       // Then close the file again
+    return true;
+  }
+  Serial.println("\tFile Not Found");
+  return false;                                         // If the file doesn't exist, return false
+}
+
 void handleRoot() {
   digitalWrite(led, 1);
-  server.send(200, "text/plain", "hello from esp8266!");
+  if (SPIFFS.exists("index.html")) {
+    File f = SPIFFS.open("index.html", "r");
+    server.streamFile(f, "text/html");
+    // server.send(200, "text/plain", "hello from esp8266!");
+  }
   digitalWrite(led, 0);
 }
 
@@ -89,6 +123,19 @@ void handleNotFound(){
   server.send(404, "text/plain", message);
   digitalWrite(led, 0);
 }
+*/
+
+void onHome(AsyncWebServerRequest *request) {
+    if (request->header("If-Modified-Since").equals(last_modified)) {
+        request->send(304);
+    } else {
+      printf("%s: serving home\n\r", __FUNCTION__);
+        AsyncWebServerResponse *response = request->beginResponse_P(200, "text/html", index_html_gz, index_html_gz_len);
+        response->addHeader("Content-Encoding", "gzip");
+        response->addHeader("Last-Modified", last_modified);
+        request->send(response);
+    }
+}
 
 const char * connectStatusStr() {
   
@@ -102,6 +149,7 @@ const char * connectStatusStr() {
         case STATION_NO_AP_FOUND: return "STATION_NO_AP_FOUND";
         case STATION_CONNECT_FAIL: return "STATION_CONNECT_FAIL";
         case STATION_GOT_IP: return "STATION_GOT_IP";
+        default: return "UNKNOWN";
     }
 }
 
@@ -255,6 +303,8 @@ bool httpRequest(HttpRequest::HTTP_METHOD method, const String & uri, const char
     delete httpClient;
     httpClient = NULL;
   }
+
+  return true;
 }
 
 bool getRequest(String & uri, void * cb) {
@@ -277,7 +327,7 @@ static int publishMqttPayload(AsyncMqttClient &client, const String &topic, cons
     printf("%s: Topic: %s Payload: %s\n\r", __FUNCTION__, topic.c_str(), payload.c_str());
   }
   else {
-    Serial.printf("%s: Failed to Publish MQTT message: MQTT Client Not Connected!\r\n");
+    Serial.printf("%s: Failed to Publish MQTT message: MQTT Client Not Connected!\r\n", __FUNCTION__);
   }
   return success;
 }
@@ -325,29 +375,6 @@ int thingsboardPublishTelem(const String &payload) {
 
   return 0;
 }
-
-
-/*
-int onDataSent(HttpConnection& client, bool successful)
-{
-	if (successful)
-		Serial.println("Success sent");
-	else
-		Serial.println("Failed");
-
-	String response = client.getResponseString();
-	Serial.println("Server response: '" + response + "'");
-	if (response.length() > 0)
-	{
-		int intVal = response.toInt();
-
-		if (intVal == 0)
-			Serial.println("Sensor value wasn't accepted. May be we need to wait a little?");
-	}
-
-	return 0;
-}
-*/
 
 void logESPStats() {
     /*
@@ -606,6 +633,26 @@ void handleAmrMsg(const void * msg, AMR_MSG_TYPE msgType, const uint8_t * data) 
   }
 }
 
+void setup_EEPROM(const String& dict) 
+{
+    EEPROM.begin(SPI_FLASH_SEC_SIZE);
+    Embedis::dictionary( dict,
+        SPI_FLASH_SEC_SIZE,
+        [](size_t pos) -> char { return EEPROM.read(pos); },
+        [](size_t pos, char value) { EEPROM.write(pos, value); },
+        []() { EEPROM.commit(); }
+    );
+        // LOG( String() + F("[ Embedis : EEPROM dictionary installed ]") );
+        // LOG( String() + F("[ Embedis : EEPROM dictionary selected ]") );
+        // LOG( String() + F("[ Embedis : Note Bene! EEPROM 'Set' takes a long time on Arduino101... (wait for it!)]") );
+}
+
+void setup_EEPROM() 
+{
+    setup_EEPROM( F("EEPROM") );
+}
+
+
 WiFiEventHandler staGotIPHandler;
 WiFiEventHandler staDisconnectHandler;
 
@@ -630,10 +677,35 @@ void onSTADisconnected(WiFiEventStationModeDisconnected eventInfo) {
 }
 
 void setup(void){
-
   pinMode(led, OUTPUT);
   digitalWrite(led, 0);
   Serial.begin(115200);
+  while (!Serial)
+  {
+    ;
+  }
+
+  // Cache the Last-Modifier header value
+  snprintf_P(last_modified, sizeof(last_modified), PSTR("%s %s GMT"), __DATE__, __TIME__);
+
+  embedis.reset();
+  setup_EEPROM();
+
+  String key_test;
+  if (!embedis.get("keytest", key_test))
+  {
+    printf("Embedis get: 'keytest'=%s\n\r", key_test.c_str());
+    key_test = "Hello World!";
+    printf("Embedis 'key_test' not found. Setting to %s\r\n", key_test.c_str());
+    embedis.set("keytest", key_test);
+    embedis.set("keytest", key_test);
+    embedis.set("keytest", key_test);
+  }
+  else
+  {
+    printf("Embedis get: 'keytest'=%s\n\r", key_test.c_str());
+  }
+
   // Serial.setDebugOutput(true);
   staGotIPHandler = WiFi.onStationModeGotIP(&onSTAGotIP);
   staDisconnectHandler = WiFi.onStationModeDisconnected(&onSTADisconnected);
@@ -655,32 +727,32 @@ void setup(void){
   // WiFi.mode(WIFI_OFF);
   // WiFi.forceSleepBegin();
 
-  Serial.println("");
-  chipId = ESP.getChipId();
-  Serial.printf("ESP8266 Chip ID: %u (0x%x)\r\n", chipId, chipId);
-
   // Wait for connection
-  while (WiFi.status() != WL_CONNECTED) {
+  while (WiFi.status() != WL_CONNECTED)
+  {
     delay(500);
     Serial.print(".");
   }
 
-  staGotIPHandler = WiFi.onStationModeGotIP(&onSTAGotIP);
-  staDisconnectHandler = WiFi.onStationModeDisconnected(&onSTADisconnected);
+  Serial.println("");
+  chipId = ESP.getChipId();
+  Serial.printf("ESP8266 Chip ID: %u (0x%x)\r\n", chipId, chipId);
 
-  if (mdns.begin("esp8266", WiFi.localIP())) {
+  if (mdns.begin("esp8266", WiFi.localIP()))
+  {
     Serial.println("MDNS responder started");
   }
 
-  server.on("/", handleRoot);
+  // Configure the webserver
+  server = new AsyncWebServer(80);
+  server->rewrite("/", "/index.html");
+  server->on("/index.html", HTTP_GET, onHome);
 
-  server.on("/inline", [](){
-    server.send(200, "text/plain", "this works as well");
+  // 404
+  server->onNotFound([](AsyncWebServerRequest *request) {
+    request->send(404);
   });
-
-  server.onNotFound(handleNotFound);
-
-  server.begin();
+  server->begin();
   Serial.println("HTTP server started");
 
   amrInit();
@@ -693,12 +765,8 @@ void setup(void){
 }
 
 void loop(void){
-  server.handleClient();
-
   if (wifiFirstConnected) {
     NTP.begin("pool.ntp.org", 1, true, 0);
     wifiFirstConnected = false;
   }
-
-  
 }
