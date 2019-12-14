@@ -50,6 +50,12 @@ std::string ReportToInfluxdbLine::serializeScmReport(
   out += " ";
   out += keyName + uint32ToString(scm.wattHrs);
 
+  // Timestamp (convert from seconds to nanoseconds)
+  if (scm.tstamp_s != 0) {
+    out += " ";
+    out += uint32ToString(scm.tstamp_s) + "000000000";
+  }
+
   return out;
 }
 
@@ -75,6 +81,12 @@ std::string ReportToInfluxdbLine::serializeIdmReport(
   out += ",msgCnt=" + uint32ToString(idm.msgCnt);
   out += ",txTimeOffset=" + uint32ToString(idm.txTimeOffset_ms);
 
+  // Timestamp (convert from seconds to nanoseconds)
+  if (idm.tstamp_s != 0) {
+    out += " ";
+    out += uint32ToString(idm.tstamp_s) + "000000000";
+  }
+
   return out;
 }
 
@@ -86,15 +98,29 @@ std::string ReportToInfluxdbLine::serializeLogReport(
     out += ",deviceId=" + log.deviceId;
   }
 
-  out += " uptime=" + uint32ToString(log.uptime);
+  out += " uptime=" + uint32ToString(log.uptime_s);
   out += ",freeHeap=" + uint32ToString(log.freeHeap);
   out += ",connectStatus=\"" + log.connectStatus + "\"";
+
+  // Timestamp (convert from seconds to nanoseconds)
+  if (log.tstamp_s != 0) {
+    out += " ";
+    out += uint32ToString(log.tstamp_s) + "000000000";
+  }
 
   return out;
 }
 
 std::string ReportToJson::serializeScmReport(const ScmReport &scm) const {
   std::string out = "{";
+
+  if (scm.tstamp_s != 0) {
+    // Convert from seconds to milliseconds
+    out += "\"ts\":" + uint32ToString(scm.tstamp_s) + "000";
+    out += ", ";
+    out += "\"values:\" {";
+  }
+
   if (scm.deviceId != "") {
     out += "\"DeviceId=\":" + scm.deviceId + ", ";
   }
@@ -116,11 +142,23 @@ std::string ReportToJson::serializeScmReport(const ScmReport &scm) const {
 
   out += uint32ToString(scm.wattHrs) + "}";
 
+  if (scm.tstamp_s != 0) {
+    out += "}";
+  }
+
   return out;
 }
 
 std::string ReportToJson::serializeIdmReport(const IdmReport &idm) const {
   std::string out = "{";
+
+  if (idm.tstamp_s != 0) {
+    // Convert from seconds to milliseconds
+    out += "\"ts\":" + uint32ToString(idm.tstamp_s) + "000";
+    out += ", ";
+    out += "\"values:\" {";
+  }
+
   if (idm.deviceId != "") {
     out += "\"DeviceId\":" + idm.deviceId + ", ";
   }
@@ -133,20 +171,35 @@ std::string ReportToJson::serializeIdmReport(const IdmReport &idm) const {
   out += ", \"TxTimeOffset\":" + uint32ToString(idm.txTimeOffset_ms);
   out += "}";
 
+  if (idm.tstamp_s != 0) {
+    out += "}";
+  }
+
   return out;
 }
 
 std::string ReportToJson::serializeLogReport(const LogReport &log) const {
   std::string out = "{";
 
+  if (log.tstamp_s != 0) {
+    // Convert from seconds to milliseconds
+    out += "\"ts\":" + uint32ToString(log.tstamp_s) + "000";
+    out += ", ";
+    out += "\"values:\" {";
+  }
+
   if (log.deviceId != "") {
     out += "\"DeviceId\":" + log.deviceId + ", ";
   }
 
-  out += "\"uptime\":" + uint32ToString(log.uptime);
+  out += "\"uptime\":" + uint32ToString(log.uptime_s);
   out += ", \"freeHeap\":" + uint32ToString(log.freeHeap);
   out += ", \"connectStatus\":\"" + log.connectStatus;
   out += "\"}";
+
+  if (log.tstamp_s != 0) {
+    out += "}";
+  }
 
   return out;
 }

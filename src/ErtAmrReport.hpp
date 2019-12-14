@@ -14,6 +14,7 @@ enum ScmType {
 };
 
 struct IdmReport {
+  uint32_t tstamp_s;
   std::string deviceId;
   uint32_t ertId;
   uint32_t consumption_Wh;
@@ -26,6 +27,7 @@ struct IdmReport {
 };
 
 struct ScmReport {
+  uint32_t tstamp_s;
   std::string deviceId;
   uint32_t ertId;
   uint32_t wattHrs;
@@ -33,8 +35,9 @@ struct ScmReport {
 };
 
 struct LogReport {
+  uint32_t tstamp_s;
   std::string deviceId;
-  uint32_t uptime;
+  uint32_t uptime_s;
   uint32_t freeHeap;
   std::string connectStatus;
 };

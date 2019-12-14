@@ -1,26 +1,20 @@
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <vector>
-// #include <ESP8266HTTPClient.h>
 #include <ESP8266mDNS.h>
 #include <ESPAsyncTCP.h>
 #include <ESPAsyncWebServer.h>
 #include <Esp.h>
-#include <NtpClientLib.h>
 #include "static/index.html.gz.h"
-// #include <NTPtimeESP.h>
 #include <AsyncMqttClient.h>
 #include <Embedis.h>
 #include <FS.h>
 #include <Ticker.h>
-#include <Time.h>
+#include <sntp.h>
 Embedis embedis(Serial);
 
 #include <EEPROM.h>
 #include "spi_flash.h"
-
-// NTP Options:
-// NtpClientLib - No ISO time. Supports DST
 
 extern "C" {
 #include <user_interface.h>
@@ -36,8 +30,9 @@ const int AMR_SCM_METER_ID_EXCESS = 32839946;
 const int AMR_SCM_METER_ID_RESIDUAL = 32839947;
 const int AMR_SCM_WH_CONVERSION = 10;  // 10 Wh to Wh
 
+const uint32_t EPOCH_TIME_MIN_SECONDS = 1575158400;
+
 static uint32_t chipId = 0;
-static uint32_t uptime = 0;
 // static struct rst_info* rtc_info = NULL;
 // static char logMsg[128] = "";
 Ticker amrProcessing;
@@ -294,48 +289,40 @@ bool httpRequest(HttpRequest::HTTP_METHOD method, const String &uri,
   return true;
 }
 
+uint32_t get_current_timestamp() {
+  uint32_t tstamp_s = sntp_get_current_timestamp();
+  return tstamp_s > EPOCH_TIME_MIN_SECONDS ? tstamp_s : 0;
+}
+
+uint32_t nextLogTime_s = 5;
+
 void logESPStats() {
-  /*
-   * 1 - ID
-   * 2 - Uptime
-   * 3 - Heap
-   * 4 - Wifi Status
-   * 6 - Msg
-   */
+  uint32_t tstamp_s = get_current_timestamp();
+  uint32_t uptime_us = system_get_time();
+  uint32_t uptime_s = uptime_us / 1000000;
+  Serial.printf("tstamp_s=%u uptime=%u\n\r", tstamp_s, uptime_s);
 
-  time_t t = now();  // NTP.getTime();;
-  unsigned long t_ms = millis();
-  // time_t t = NTP.getTime();
-  printf("getTime=%lu millis=%lu\n\r", t, t_ms);
-
-  if (uptime % 300 == 0) {
-    String dateStr = "NONE";  // NTP.getTimeDateString();
+  if (uptime_s > nextLogTime_s) {
     uint32_t freeHeap = ESP.getFreeHeap();
 
     ertamr::LogReport logReport;
+    logReport.tstamp_s = tstamp_s;
     logReport.deviceId = deviceId;
     logReport.freeHeap = freeHeap;
-    logReport.uptime = uptime;
+    logReport.uptime_s = uptime_s = uptime_s;
     logReport.connectStatus = connectStatusStr();
 
-    Serial.printf("Uploading status log. %s uptime=%u free=%u\r\n",
-                  dateStr.c_str(), uptime, freeHeap);
+    Serial.printf("Log stats: tstamp_s=%u uptime_s=%u free=%u\r\n", tstamp_s,
+                  uptime_s, freeHeap);
 
     mqttInflux.publishLogReport(logReport);
     mqttThingsboard.publishLogReport(logReport);
-  }
 
-  uptime += 5;
+    nextLogTime_s = uptime_s + 300;
+  }
 }
 
 void handleScmMsg(const AmrScmMsg *msg) {
-  /*
-    DateTime now = SystemClock.now(eTZ_UTC);
-    String dateStr = now.toISO8601();
-    printScmMsg(dateStr.c_str(), msg);
-    */
-  String dateStr = "NONE";  // NTP.getTimeDateString();
-
   // TODO Compute differential production and net usage values
   // TODO Compute running total for each day
 
@@ -343,6 +330,7 @@ void handleScmMsg(const AmrScmMsg *msg) {
     bool publishMsg = false;
 
     ertamr::ScmReport report;
+    report.tstamp_s = get_current_timestamp();
     report.wattHrs = msg->consumption * AMR_SCM_WH_CONVERSION;
     report.deviceId = deviceId;
 
@@ -361,7 +349,7 @@ void handleScmMsg(const AmrScmMsg *msg) {
     }
 
     if (publishMsg) {
-      printScmMsg(dateStr.c_str(), msg);
+      printScmMsg(get_current_timestamp(), msg);
       mqttInflux.publishScmReport(report);
       mqttThingsboard.publishScmReport(report);
     }
@@ -369,37 +357,15 @@ void handleScmMsg(const AmrScmMsg *msg) {
 }
 
 void handleScmPlusMsg(const AmrScmPlusMsg *msg) {
-  /*
-    DateTime now = SystemClock.now();
-    String dateStr = now.toISO8601();
-    printScmPlusMsg(dateStr.c_str(), msg);
-    */
-  String dateStr = "NONE";  // NTP.getTimeDateString();
-
-  // printScmPlusMsg(dateStr.c_str(), msg);
+  // printScmPlusMsg(get_current_timestamp(), msg);
 }
 
 void handleIdmMsg(const AmrIdmMsg *msg) {
-  /*
-    DateTime now = SystemClock.now(eTZ_UTC);
-    time_t epoch = now.toUnixTime();
-
-    String dateStr = now.toISO8601();
-    Serial.printf("Epoch: %lu\t", epoch);
-    printIdmMsg(dateStr.c_str(), msg);
-    */
-  /*if (msg->ertId != AMR_METER_ID) {
-    return;
-  }*/
-
-  // time_t now = NTP.getTime();
-  String dateStr = "NONE";  // NTP.getTimeDateString();
   if (msg && (msg->ertId == AMR_IDM_METER_ID)) {
-    // TODO Use NTP timestamp when uploading data
-    // TODO Shift NTP timestamp by TxTimeOffset
     // TODO Use msgCnt and previous message count to upload telem for missed
     // msgs
     ertamr::IdmReport report;
+    report.tstamp_s = get_current_timestamp();
     report.ertId = msg->ertId;
     report.deviceId = deviceId;
     report.consumption_Wh = msg->data.x18.lastConsumptionHighRes;
@@ -411,7 +377,7 @@ void handleIdmMsg(const AmrIdmMsg *msg) {
     report.msgCnt = msg->consumptionIntervalCount;
     report.txTimeOffset_ms = msg->txTimeOffset;
 
-    printIdmMsg(dateStr.c_str(), msg);
+    printIdmMsg(get_current_timestamp(), msg);
     mqttInflux.publishIdmReport(report);
     mqttThingsboard.publishIdmReport(report);
   }
@@ -438,7 +404,7 @@ printf("mqttMsg: %s\r\n", mqttMsg.c_str());
   }
 
   if (msg) {
-    // printIdmMsg(dateStr.c_str(), msg);
+    // printIdmMsg(get_current_timestamp(), msg);
   }
 }
 
@@ -489,8 +455,6 @@ void onSTAGotIP(WiFiEventStationModeGotIP ipInfo) {
 
   mqttInflux.connect();
   mqttThingsboard.connect();
-  // NTP.begin();
-  // NTP.begin("pool.ntp.org", 1, true, 0);
 }
 
 void onSTADisconnected(WiFiEventStationModeDisconnected eventInfo) {
@@ -502,6 +466,7 @@ void setup(void) {
   pinMode(led, OUTPUT);
   digitalWrite(led, 0);
   Serial.begin(115200);
+  // Wait for serial comm to be ready
   while (!Serial) {
     ;
   }
@@ -531,11 +496,17 @@ void setup(void) {
   staGotIPHandler = WiFi.onStationModeGotIP(&onSTAGotIP);
   staDisconnectHandler = WiFi.onStationModeDisconnected(&onSTADisconnected);
 
+  // NTP Setup
+  sntp_setservername(0, "us.pool.ntp.org");
+  sntp_setservername(1, "pool.ntp.org");
+  sntp_init();
+
   ertamr::ErtAmrMqttClientConfig influxConfig;
   influxConfig.clientId = "";
   influxConfig.host = "owen-htpc.local";
   influxConfig.port = 1883;
   influxConfig.qos = 0;
+  influxConfig.clientId = "";
   influxConfig.username = "telegraf";
   influxConfig.password = "telegraf";
   influxConfig.topic = "sensors/ertamr";
@@ -545,11 +516,11 @@ void setup(void) {
   mqttInflux.configure(influxConfig);
 
   ertamr::ErtAmrMqttClientConfig thingsboardConfig;
+  thingsboardConfig.host = "demo.thingsboard.io";
+  thingsboardConfig.port = 1883;
   thingsboardConfig.clientId = "e026fda0-cecd-11e9-862b-9deda36b0cc7";
   thingsboardConfig.username = "an3rLk4odSos4Q3o3SOF";
   thingsboardConfig.password = "";
-  thingsboardConfig.host = "demo.thingsboard.io";
-  thingsboardConfig.port = 1883;
   thingsboardConfig.qos = 0;
   thingsboardConfig.topic = "v1/devices/me/telemetry";
   thingsboardConfig.serializer = &jsonSerializer;
@@ -598,9 +569,4 @@ void setup(void) {
   logProcessing.attach(5.0, logESPStats);
 }
 
-void loop(void) {
-  if (wifiFirstConnected) {
-    NTP.begin("pool.ntp.org", 1, true, 0);
-    wifiFirstConnected = false;
-  }
-}
+void loop(void) {}
